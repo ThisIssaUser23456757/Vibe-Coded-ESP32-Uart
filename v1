@@ -1,0 +1,70 @@
+/*
+ * ESP32 UART Bridge
+ * ------------------------------------------------------------------
+ * Transparent bidirectional bridge between UART0 (USB serial) and
+ * UART1 (external device on GPIO16/GPIO17 by default).
+ *
+ * Full-duplex: two FreeRTOS tasks, one per direction.
+ *
+ * Works on classic ESP32 with arduino-esp32 core 2.x / 3.x.
+ */
+
+#include <Arduino.h>
+
+// -------------------- CONFIGURATION --------------------
+#define BRIDGE_BAUD      115200      // baud rate for both UARTs
+#define UART_B_RX_PIN    16          // ESP32 RX  <- external TX
+#define UART_B_TX_PIN    17          // ESP32 TX  -> external RX
+#define UART_B_PORT      1           // 1 or 2 (0 is reserved for USB)
+
+#define BUF_SIZE         512         // chunk size per transfer
+// --------------------------------------------------------
+
+HardwareSerial UartB(UART_B_PORT);
+
+static TaskHandle_t taskAtoB = NULL;
+static TaskHandle_t taskBtoA = NULL;
+
+// ---------- UART0 (USB) -> UART1 ----------
+static void taskForwardAtoB(void *arg) {
+    uint8_t buf[BUF_SIZE];
+    for (;;) {
+        int avail = Serial.available();
+        if (avail > 0) {
+            size_t n = Serial.readBytes(buf, min(avail, (int)BUF_SIZE));
+            if (n) UartB.write(buf, n);
+        } else {
+            vTaskDelay(1);   // yield 1 tick so the other task can run
+        }
+    }
+}
+
+// ---------- UART1 -> UART0 (USB) ----------
+static void taskForwardBtoA(void *arg) {
+    uint8_t buf[BUF_SIZE];
+    for (;;) {
+        int avail = UartB.available();
+        if (avail > 0) {
+            size_t n = UartB.readBytes(buf, min(avail, (int)BUF_SIZE));
+            if (n) Serial.write(buf, n);
+        } else {
+            vTaskDelay(1);
+        }
+    }
+}
+
+void setup() {
+    // UART0 -> USB-serial chip on the dev board
+    Serial.begin(BRIDGE_BAUD);
+
+    // UART1 on custom pins (default GPIO9/10 are the flash pins — do NOT use)
+    UartB.begin(BRIDGE_BAUD, SERIAL_8N1, UART_B_RX_PIN, UART_B_TX_PIN);
+
+    // Pin each direction to a different core for maximum throughput
+    xTaskCreatePinnedToCore(taskForwardAtoB, "A->B", 4096, NULL, 1, &taskAtoB, 0);
+    xTaskCreatePinnedToCore(taskForwardBtoA, "B->A", 4096, NULL, 1, &taskBtoA, 1);
+}
+
+void loop() {
+    vTaskDelay(portMAX_DELAY);   // everything happens in the tasks
+}
